@@ -161,6 +161,52 @@ def _parse_transport_config() -> tuple[str, str, int]:
     return transport, http_host, http_port
 
 
+def _http_path() -> str:
+    """Path the streamable-http endpoint is served at (default /mcp).
+
+    The HTTP transport has no built-in authentication, so a public deployment
+    should set GARMIN_MCP_PATH to a long random value (a capability URL),
+    e.g. /mcp-f3a9c2..., and share the full URL only with trusted MCP clients.
+    """
+    path = os.getenv("GARMIN_MCP_PATH", "/mcp").strip()
+    if not path.startswith("/"):
+        path = "/" + path
+    return path
+
+
+def _seed_tokens_from_env():
+    """Populate the token directory from GARMINTOKENS_BASE64_DATA.
+
+    Containerized deployments have no interactive terminal for the MFA login
+    flow. Instead, run `garmin-mcp-auth` on a workstation, then set
+    GARMINTOKENS_BASE64_DATA to `tar czf - -C ~ .garminconnect | base64 -w0`.
+    The tokens are (re)written on every boot, so rotating them is just
+    updating the variable and redeploying; no volume is required.
+    """
+    data = os.environ.get("GARMINTOKENS_BASE64_DATA")
+    if not data:
+        return
+    import io
+    import tarfile
+
+    dir_path = os.path.expanduser(tokenstore)
+    os.makedirs(dir_path, mode=0o700, exist_ok=True)
+    with tarfile.open(fileobj=io.BytesIO(base64.b64decode(data)), mode="r:gz") as tar:
+        for member in tar.getmembers():
+            # Flatten to basenames: accepts archives made from the token dir
+            # itself or from $HOME, and rules out path traversal.
+            name = os.path.basename(member.name)
+            if not member.isfile() or not name.endswith(".json"):
+                continue
+            with tar.extractfile(member) as src:
+                with open(os.path.join(dir_path, name), "wb") as dst:
+                    dst.write(src.read())
+    print(
+        f"Seeded Garmin tokens from GARMINTOKENS_BASE64_DATA into '{dir_path}'.",
+        file=sys.stderr,
+    )
+
+
 class _ToolFilter:
     """Wraps a FastMCP app to conditionally register tools by function name.
 
@@ -349,11 +395,16 @@ def main():
     #   GARMIN_MCP_TRANSPORT - stdio (default) | streamable-http | sse
     #   GARMIN_MCP_HOST      - bind address for HTTP transports (default 0.0.0.0)
     #   GARMIN_MCP_PORT      - bind port for HTTP transports (default 8000)
+    #   GARMIN_MCP_PATH      - streamable-http endpoint path (default /mcp);
+    #                          set to a long random value on public hosts
     try:
         transport, http_host, http_port = _parse_transport_config()
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         sys.exit(1)
+
+    # Seed OAuth tokens from the environment (containerized deployments)
+    _seed_tokens_from_env()
 
     # Initialize Garmin client
     garmin_client = init_api(email, password)
@@ -385,7 +436,12 @@ def main():
 
     # Create the MCP app, wrapped so the env-var filter can drop tools.
     # host/port only matter for the HTTP transports; stdio ignores them.
-    fastmcp = FastMCP("Garmin Connect v1.0", host=http_host, port=http_port)
+    fastmcp = FastMCP(
+        "Garmin Connect v1.0",
+        host=http_host,
+        port=http_port,
+        streamable_http_path=_http_path(),
+    )
     app = _ToolFilter(fastmcp, enabled_tools, disabled_tools)
     if enabled_tools:
         print(f"Tool filter: allowlist of {len(enabled_tools)} tool(s).", file=sys.stderr)

@@ -399,6 +399,7 @@ By default the server communicates over **stdio**, which is what Claude Desktop,
 - `GARMIN_MCP_TRANSPORT`: `stdio` (default), `streamable-http`, or `sse`
 - `GARMIN_MCP_HOST`: bind address for HTTP transports (default `0.0.0.0`)
 - `GARMIN_MCP_PORT`: bind port for HTTP transports (default `8000`)
+- `GARMIN_MCP_PATH`: path the streamable-http endpoint is served at (default `/mcp`)
 
 ```bash
 GARMIN_MCP_TRANSPORT=streamable-http garmin-mcp
@@ -406,10 +407,20 @@ GARMIN_MCP_TRANSPORT=streamable-http garmin-mcp
 
 When an HTTP transport is selected:
 
-- MCP clients connect to the **`/mcp`** path (e.g. `http://localhost:8000/mcp`).
+- MCP clients connect to the **`/mcp`** path (e.g. `http://localhost:8000/mcp`), or to `GARMIN_MCP_PATH` if set.
 - A plain **`GET /healthz`** endpoint is exposed for liveness/readiness probes.
 
-The server itself performs **no authentication** on the HTTP endpoint — put it behind a reverse proxy (nginx, Traefik, Authelia, etc.) if it is reachable beyond localhost.
+The server itself performs **no authentication** on the HTTP endpoint — put it behind a reverse proxy (nginx, Traefik, Authelia, etc.) if it is reachable beyond localhost. On hosts where clients cannot send auth headers (e.g. claude.ai custom connectors), set `GARMIN_MCP_PATH` to a long random value (e.g. `/mcp-f3a9c2e1...`) so the endpoint URL acts as a capability URL, and share it only with trusted clients.
+
+#### Seeding tokens in containers
+
+Cloud deployments have no interactive terminal for the MFA login flow. Instead of shipping `GARMIN_EMAIL`/`GARMIN_PASSWORD`, authenticate once on a workstation with `garmin-mcp-auth`, then provide the resulting tokens through an environment variable:
+
+```bash
+GARMINTOKENS_BASE64_DATA=$(tar czf - -C ~ .garminconnect | base64 -w0)
+```
+
+At boot the server unpacks this archive into the token directory (`GARMINTOKENS`, default `~/.garminconnect`) before logging in — no volume and no stored password required. Tokens last ~6 months; to rotate, re-run `garmin-mcp-auth` locally and update the variable.
 
 ### Garmin Connect China (garmin.cn)
 
